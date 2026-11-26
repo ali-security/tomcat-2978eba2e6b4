@@ -18,7 +18,9 @@ package org.apache.catalina.core;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
@@ -31,11 +33,15 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import org.apache.catalina.Context;
+import org.apache.catalina.Wrapper;
+import org.apache.catalina.authenticator.BasicAuthenticator;
 import org.apache.catalina.connector.Request;
+import org.apache.catalina.startup.TesterMapRealm;
 import org.apache.catalina.startup.Tomcat;
 import org.apache.catalina.startup.TomcatBaseTest;
 import org.apache.tomcat.util.ExceptionUtils;
 import org.apache.tomcat.util.buf.ByteChunk;
+import org.apache.tomcat.util.descriptor.web.LoginConfig;
 
 public class TestApplicationHttpRequest extends TomcatBaseTest {
 
@@ -220,7 +226,7 @@ public class TestApplicationHttpRequest extends TomcatBaseTest {
             request.setAttribute("key", "value");
             return request;
         }
-        return new ApplicationHttpRequest(getNestedRequest(depth - 1), null, false);
+        return new ApplicationHttpRequest(getNestedRequest(depth - 1), null, false, null);
     }
 
 
@@ -258,6 +264,132 @@ public class TestApplicationHttpRequest extends TomcatBaseTest {
 
         Assert.assertEquals(200, rc);
         Assert.assertEquals("OK", response.toString());
+    }
+
+
+    /*
+     * isUserInRole() called by the target of a RequestDispatcher must use the security-role-ref mappings of the target
+     * Servlet, not those of the Servlet the request was originally mapped to.
+     */
+    @Test
+    public void testSecurityRoleRefForwardTargetMappingDenies() throws Exception {
+        // Original Servlet links to a role the user has, the forward target links to one the user does not have
+        doTestSecurityRoleRef("/source", "admin", "unused", "guest", false, "target=false");
+    }
+
+
+    @Test
+    public void testSecurityRoleRefForwardTargetMappingGrants() throws Exception {
+        // Original Servlet links to a role the user does not have, the forward target links to one the user has
+        doTestSecurityRoleRef("/source", "guest", "unused", "admin", false, "target=true");
+    }
+
+
+    @Test
+    public void testSecurityRoleRefInclude() throws Exception {
+        // The include target must use its own mapping and the including Servlet must keep using its own mapping
+        doTestSecurityRoleRef("/source", "admin", "unused", "guest", true,
+                "source-before=true;target=false;source-after=true");
+    }
+
+
+    @Test
+    public void testSecurityRoleRefNestedForwardInclude() throws Exception {
+        // Forward to /middle which then includes /target. Each Servlet must use its own mapping.
+        doTestSecurityRoleRef("/forward-middle", "guest", "admin", "guest", true,
+                "source-before=true;target=false;source-after=true");
+    }
+
+
+    private void doTestSecurityRoleRef(String path, String sourceRole, String middleRole, String targetRole,
+            boolean include, String expected) throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        Context ctx = getProgrammaticRootContext();
+
+        Wrapper source = Tomcat.addServlet(ctx, "source", new RoleRefSourceServlet("/target", include));
+        source.addSecurityReference(ROLE_LINK, sourceRole);
+        ctx.addServletMappingDecoded("/source", "source");
+
+        Wrapper forwardMiddle = Tomcat.addServlet(ctx, "forward-middle", new RoleRefSourceServlet("/middle", false));
+        forwardMiddle.addSecurityReference(ROLE_LINK, sourceRole);
+        ctx.addServletMappingDecoded("/forward-middle", "forward-middle");
+
+        Wrapper middle = Tomcat.addServlet(ctx, "middle", new RoleRefSourceServlet("/target", true));
+        middle.addSecurityReference(ROLE_LINK, middleRole);
+        ctx.addServletMappingDecoded("/middle", "middle");
+
+        Wrapper target = Tomcat.addServlet(ctx, "target", new RoleRefTargetServlet());
+        target.addSecurityReference(ROLE_LINK, targetRole);
+        ctx.addServletMappingDecoded("/target", "target");
+
+        TesterMapRealm realm = new TesterMapRealm();
+        realm.addUser("testUser", "testPwd");
+        realm.addUserRole("testUser", "admin");
+        ctx.setRealm(realm);
+
+        ctx.setLoginConfig(new LoginConfig("BASIC", null, null, null));
+        ctx.getPipeline().addValve(new BasicAuthenticator());
+        ctx.setPreemptiveAuthentication(true);
+
+        tomcat.start();
+
+        Map<String,List<String>> reqHeaders = new HashMap<>();
+        List<String> authHeaders = new ArrayList<>();
+        // testUser, testPwd
+        authHeaders.add("Basic dGVzdFVzZXI6dGVzdFB3ZA==");
+        reqHeaders.put("Authorization", authHeaders);
+
+        ByteChunk response = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + path, response, reqHeaders, null);
+
+        Assert.assertEquals(200, rc);
+        Assert.assertEquals(expected, response.toString());
+    }
+
+
+    private static final String ROLE_LINK = "roleLink";
+
+
+    private static class RoleRefSourceServlet extends HttpServlet {
+
+        private static final long serialVersionUID = 1L;
+
+        private final String target;
+        private final boolean include;
+
+        RoleRefSourceServlet(String target, boolean include) {
+            this.target = target;
+            this.include = include;
+        }
+
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+            resp.setContentType("text/plain");
+            resp.setCharacterEncoding("UTF-8");
+            if (include) {
+                PrintWriter pw = resp.getWriter();
+                pw.print("source-before=" + req.isUserInRole(ROLE_LINK) + ";");
+                req.getRequestDispatcher(target).include(req, resp);
+                pw.print(";source-after=" + req.isUserInRole(ROLE_LINK));
+            } else {
+                req.getRequestDispatcher(target).forward(req, resp);
+            }
+        }
+    }
+
+
+    private static class RoleRefTargetServlet extends HttpServlet {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+            resp.setContentType("text/plain");
+            resp.setCharacterEncoding("UTF-8");
+            resp.getWriter().print("target=" + req.isUserInRole(ROLE_LINK));
+        }
     }
 
 
