@@ -971,7 +971,7 @@ public class TestAbstractAjpProcessor extends TomcatBaseTest {
     /**
      * Process response header packet and checks the status. Any other data is ignored.
      */
-    private Map<String, List<String>> validateResponseHeaders(TesterAjpMessage message, int expectedStatus,
+    static Map<String, List<String>> validateResponseHeaders(TesterAjpMessage message, int expectedStatus,
             String expectedMessage) throws Exception {
         // First two bytes should always be AB
         Assert.assertEquals((byte) 'A', message.buf[0]);
